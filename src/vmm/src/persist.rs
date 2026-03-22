@@ -446,11 +446,28 @@ pub fn restore_from_snapshot(
                 )
                 .into());
             }
-            (
-                guest_memory_from_file(mem_backend_path, mem_state, track_dirty_pages)
+
+            // If mem_backing_dir is configured, create file-backed MAP_SHARED memory
+            // and populate it from the snapshot file. This enables COW snapshots on
+            // the restored VM (fdatasync + FICLONE instead of full memory copy).
+            if let Some(ref backing_dir) = vm_resources.machine_config.mem_backing_dir {
+                (
+                    guest_memory_from_file_backed(
+                        mem_backend_path,
+                        backing_dir,
+                        mem_state,
+                        track_dirty_pages,
+                    )
                     .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
-                None,
-            )
+                    None,
+                )
+            } else {
+                (
+                    guest_memory_from_file(mem_backend_path, mem_state, track_dirty_pages)
+                        .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                    None,
+                )
+            }
         }
         MemBackendType::Uffd => guest_memory_from_uffd(
             mem_backend_path,
@@ -512,6 +529,48 @@ fn guest_memory_from_file(
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
     let mem_file = File::open(mem_file_path)?;
     let guest_mem = memory::snapshot_file(mem_file, mem_state.regions(), track_dirty_pages)?;
+    Ok(guest_mem)
+}
+
+/// Creates guest memory as file-backed MAP_SHARED by copying the snapshot file to a new
+/// backing file and mmapping it. This enables COW snapshots (fdatasync + FICLONE) on
+/// restored VMs.
+fn guest_memory_from_file_backed(
+    snapshot_mem_path: &Path,
+    backing_dir: &Path,
+    mem_state: &GuestMemoryState,
+    track_dirty_pages: bool,
+) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
+    // Copy the snapshot mem_file to the backing file location.
+    // This is the upfront cost (~50-100ms for 512MB) that enables all subsequent
+    // snapshots to use the fast COW path.
+    let backing_path = backing_dir.join("guest_mem.backing");
+    std::fs::copy(snapshot_mem_path, &backing_path)?;
+
+    // Now open the backing file and mmap it MAP_SHARED
+    let regions: Vec<_> = mem_state.regions().collect();
+    let total_size: u64 = regions.iter().map(|&(_, size)| size as u64).sum();
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&backing_path)?;
+
+    // Verify file size matches expected memory size
+    let file_size = file.metadata()?.len();
+    if file_size < total_size {
+        return Err(GuestMemoryFromFileError::Restore(
+            memory::MemoryError::OffsetTooLarge,
+        ));
+    }
+
+    let guest_mem = memory::create(
+        regions.into_iter(),
+        libc::MAP_SHARED | libc::MAP_POPULATE,
+        Some(file),
+        track_dirty_pages,
+    )?;
+
     Ok(guest_mem)
 }
 

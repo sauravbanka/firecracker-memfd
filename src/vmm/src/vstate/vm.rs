@@ -382,8 +382,8 @@ impl Vm {
                 })?;
             file_offset
                 .file()
-                .sync_data()
-                .map_err(|e| MemoryBackingFile("fdatasync", e))?;
+                .sync_all()
+                .map_err(|e| MemoryBackingFile("fsync", e))?;
         }
 
         // Step 2: FICLONE the backing file to the snapshot path.

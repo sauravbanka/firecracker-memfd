@@ -462,6 +462,11 @@ pub fn build_microvm_from_snapshot(
     vm.restore_memory_regions(guest_memory, &microvm_state.vm_state.memory)
         .map_err(StartMicrovmError::Vm)?;
 
+    // Mark if file-backed COW snapshots are available (restore path)
+    if vm_resources.machine_config.mem_backing_dir.is_some() {
+        vm.common.file_backed_cow = true;
+    }
+
     #[cfg(target_arch = "x86_64")]
     {
         // Scale TSC to match, extract the TSC freq from the state if specified
