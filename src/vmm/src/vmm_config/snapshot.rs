@@ -81,6 +81,9 @@ pub struct LoadSnapshotParams {
     pub network_overrides: Vec<NetworkOverride>,
     /// When set, the vsock backend UDS path will be overridden
     pub vsock_override: Option<VsockOverride>,
+    /// Path to a directory on a COW-capable filesystem for file-backed MAP_SHARED memory.
+    /// When set, the restore creates file-backed memory enabling fast COW snapshots.
+    pub mem_backing_dir: Option<PathBuf>,
 }
 
 /// Stores the configuration for loading a snapshot that is provided by the user.
@@ -113,6 +116,9 @@ pub struct LoadSnapshotConfig {
     /// Whether or not to override the vsock backend UDS path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock_override: Option<VsockOverride>,
+    /// Path to a directory on a COW-capable filesystem for file-backed MAP_SHARED memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_backing_dir: Option<PathBuf>,
 }
 
 /// Stores the configuration used for managing snapshot memory.
