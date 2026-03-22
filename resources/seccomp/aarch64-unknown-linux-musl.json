@@ -64,10 +64,6 @@
                 ]
             },
             {
-                "syscall": "readlinkat",
-                "comment": "Read /proc/self/fd/* to detect file-backed vs memfd memory"
-            },
-            {
                 "syscall": "close"
             },
             {

@@ -174,6 +174,11 @@ pub fn build_microvm_for_boot(
     let (mut vcpus, vcpus_exit_evt) = vm.create_vcpus(vm_resources.machine_config.vcpu_count)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
+    // Mark if file-backed COW snapshots are available
+    if vm_resources.machine_config.mem_backing_dir.is_some() {
+        vm.common.file_backed_cow = true;
+    }
+
     // Allocate memory as soon as possible to make hotpluggable memory available to all consumers,
     // before they clone the GuestMemoryMmap object
     let virtio_mem_addr = if let Some(memory_hotplug) = &vm_resources.memory_hotplug {

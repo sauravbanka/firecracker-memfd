@@ -62,6 +62,9 @@ pub struct VmCommon {
     pub resource_allocator: Mutex<ResourceAllocator>,
     /// MMIO bus
     pub mmio_bus: Arc<Bus>,
+    /// Whether guest memory is file-backed MAP_SHARED on a COW-capable filesystem.
+    /// When true, snapshots use fdatasync + FICLONE instead of full memory copy.
+    pub file_backed_cow: bool,
 }
 
 /// Errors associated with the wrappers over KVM ioctls.
@@ -141,6 +144,7 @@ impl Vm {
             interrupts: Mutex::new(HashMap::with_capacity(GSI_MSI_END as usize + 1)),
             resource_allocator: Mutex::new(ResourceAllocator::new()),
             mmio_bus: Arc::new(Bus::new()),
+            file_backed_cow: false,
         })
     }
 
@@ -337,7 +341,7 @@ impl Vm {
         snapshot_type: SnapshotType,
     ) -> Result<(), CreateSnapshotError> {
         // Try COW fast path for full snapshots with file-backed MAP_SHARED memory.
-        if snapshot_type == SnapshotType::Full && self.is_file_backed_shared() {
+        if snapshot_type == SnapshotType::Full && self.common.file_backed_cow {
             match self.snapshot_memory_cow(mem_file_path) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -348,36 +352,6 @@ impl Vm {
         }
 
         self.snapshot_memory_to_file_slow(mem_file_path, snapshot_type)
-    }
-
-    /// Checks if guest memory is backed by file-backed MAP_SHARED mappings (as opposed to
-    /// anonymous or memfd-backed memory). This is the case when `mem_backing_dir` was configured.
-    fn is_file_backed_shared(&self) -> bool {
-        use std::os::unix::io::AsRawFd;
-
-        let first = match self.guest_memory().iter().next() {
-            Some(r) => r,
-            None => return false,
-        };
-        // File-backed MAP_SHARED regions have a file_offset and MAP_SHARED flag.
-        // We distinguish from memfd by checking that the file fd corresponds to a real
-        // file (not an anonymous memfd) — but since both have file_offset, we check
-        // the MAP_SHARED flag which is set for both memfd and file-backed. The real
-        // distinction is that file-backed memory uses a real path on disk.
-        // For our purposes, any MAP_SHARED + file-backed region can use COW snapshots
-        // as long as the filesystem supports FICLONE.
-        if let Some(fo) = first.file_offset() {
-            // Check that it's MAP_SHARED (not MAP_PRIVATE snapshot restore)
-            let fd = fo.file().as_raw_fd();
-            // Verify the fd is a real file by checking it has a path in /proc
-            let link_path = format!("/proc/self/fd/{}", fd);
-            if let Ok(target) = std::fs::read_link(&link_path) {
-                // memfd paths look like "/memfd:..." while real files have actual paths
-                let target_str = target.to_string_lossy();
-                return !target_str.starts_with("/memfd:");
-            }
-        }
-        false
     }
 
     /// FICLONE ioctl number — defined in linux/fs.h as _IOW(0x94, 9, int) = 0x40049409
