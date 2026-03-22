@@ -478,14 +478,14 @@ impl VmResources {
 
         // Page faults are more expensive for shared memory mapping, including  memfd.
         // For this reason, we only back guest memory with a memfd
-        // if a vhost-user-blk device is configured in the VM, otherwise we fall back to
-        // an anonymous private memory.
+        // if a vhost-user-blk device is configured in the VM or the user explicitly
+        // requested memfd-backed memory, otherwise we fall back to anonymous private memory.
         //
         // The vhost-user-blk branch is not currently covered by integration tests in Rust,
         // because that would require running a backend process. If in the future we converge to
         // a single way of backing guest memory for vhost-user and non-vhost-user cases,
         // that would not be worth the effort.
-        if vhost_user_device_used {
+        if vhost_user_device_used || self.machine_config.memfd_backed {
             memory::memfd_backed(
                 regions,
                 self.machine_config.track_dirty_pages,

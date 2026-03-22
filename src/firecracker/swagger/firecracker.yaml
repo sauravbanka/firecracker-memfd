@@ -1376,8 +1376,8 @@ definitions:
   MachineConfiguration:
     type: object
     description:
-      Describes the number of vCPUs, memory size, SMT capabilities, huge page configuration and
-      the CPU template.
+      Describes the number of vCPUs, memory size, SMT capabilities, huge page configuration,
+      memfd-backed memory and the CPU template.
     required:
       - mem_size_mib
       - vcpu_count
@@ -1413,6 +1413,13 @@ definitions:
           - None
           - 2M
         description: Which huge pages configuration (if any) should be used to back guest memory.
+      memfd_backed:
+        type: boolean
+        description:
+          Forces memfd-backed (MAP_SHARED) guest memory, even without vhost-user-blk devices.
+          This can significantly speed up snapshot creation at the cost of slightly slower page
+          faults (~10-20%). Useful for snapshot-heavy workloads.
+        default: false
 
   MemoryBackend:
     type: object
