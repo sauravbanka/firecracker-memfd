@@ -573,13 +573,18 @@ pub fn file_backed(
         .map_err(MemoryError::FileError)?;
 
     // Preallocate to avoid ENOSPC during VM runtime and get contiguous extents
-    nix::fcntl::fallocate(
-        std::os::unix::io::AsRawFd::as_raw_fd(&file),
-        nix::fcntl::FallocateFlags::empty(),
-        0,
-        total_size as i64,
-    )
-    .map_err(|e| MemoryError::FileError(std::io::Error::from_raw_os_error(e as i32)))?;
+    // SAFETY: fd is a valid open file descriptor, and total_size fits in i64.
+    let ret = unsafe {
+        libc::fallocate(
+            std::os::unix::io::AsRawFd::as_raw_fd(&file),
+            0,
+            0,
+            total_size as i64,
+        )
+    };
+    if ret < 0 {
+        return Err(MemoryError::FileError(std::io::Error::last_os_error()));
+    }
 
     create(
         regions.iter().copied(),

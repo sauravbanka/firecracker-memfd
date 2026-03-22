@@ -381,7 +381,8 @@ impl Vm {
     }
 
     /// FICLONE ioctl number — defined in linux/fs.h as _IOW(0x94, 9, int) = 0x40049409
-    const FICLONE: libc::c_ulong = 0x40049409;
+    #[allow(clippy::cast_possible_wrap)]
+    const FICLONE: libc::c_int = 0x40049409_u32 as libc::c_int;
 
     /// Fast COW snapshot: fdatasync the backing file, then FICLONE to the snapshot path.
     ///
