@@ -485,7 +485,13 @@ impl VmResources {
         // because that would require running a backend process. If in the future we converge to
         // a single way of backing guest memory for vhost-user and non-vhost-user cases,
         // that would not be worth the effort.
-        if vhost_user_device_used || self.machine_config.memfd_backed {
+        if let Some(ref backing_dir) = self.machine_config.mem_backing_dir {
+            memory::file_backed(
+                regions,
+                backing_dir,
+                self.machine_config.track_dirty_pages,
+            )
+        } else if vhost_user_device_used || self.machine_config.memfd_backed {
             memory::memfd_backed(
                 regions,
                 self.machine_config.track_dirty_pages,

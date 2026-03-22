@@ -43,6 +43,31 @@
                 "syscall": "fsync"
             },
             {
+                "syscall": "fdatasync",
+                "comment": "Flush dirty MAP_SHARED pages before COW snapshot"
+            },
+            {
+                "syscall": "fallocate",
+                "comment": "Pre-allocate memory backing file for file-backed guest memory"
+            },
+            {
+                "syscall": "ioctl",
+                "comment": "FICLONE for COW snapshot (reflink clone)",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1074041865,
+                        "comment": "FICLONE = 0x40049409"
+                    }
+                ]
+            },
+            {
+                "syscall": "readlink",
+                "comment": "Read /proc/self/fd/* to detect file-backed vs memfd memory"
+            },
+            {
                 "syscall": "close"
             },
             {

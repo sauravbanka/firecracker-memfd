@@ -1,6 +1,7 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 use std::fmt::Debug;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -116,6 +117,12 @@ pub struct MachineConfig {
     /// Forces memfd-backed (MAP_SHARED) guest memory, even without vhost-user-blk devices.
     #[serde(default)]
     pub memfd_backed: bool,
+    /// Path to a directory on a COW-capable filesystem (XFS reflink) where guest memory
+    /// backing files will be created. If set, guest memory uses MAP_SHARED file-backed
+    /// mappings instead of anonymous memory or memfd. Enables fast COW snapshots via
+    /// fdatasync + FICLONE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_backing_dir: Option<PathBuf>,
     /// GDB socket address.
     #[cfg(feature = "gdb")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +166,7 @@ impl Default for MachineConfig {
             track_dirty_pages: false,
             huge_pages: HugePageConfig::None,
             memfd_backed: false,
+            mem_backing_dir: None,
             #[cfg(feature = "gdb")]
             gdb_socket_path: None,
         }
@@ -195,6 +203,9 @@ pub struct MachineConfigUpdate {
     /// Forces memfd-backed (MAP_SHARED) guest memory, even without vhost-user-blk devices.
     #[serde(default)]
     pub memfd_backed: Option<bool>,
+    /// Path to a directory on a COW-capable filesystem (XFS reflink) for file-backed memory.
+    #[serde(default)]
+    pub mem_backing_dir: Option<PathBuf>,
     /// GDB socket address.
     #[cfg(feature = "gdb")]
     #[serde(default)]
@@ -220,6 +231,7 @@ impl From<MachineConfig> for MachineConfigUpdate {
             track_dirty_pages: Some(cfg.track_dirty_pages),
             huge_pages: Some(cfg.huge_pages),
             memfd_backed: Some(cfg.memfd_backed),
+            mem_backing_dir: cfg.mem_backing_dir,
             #[cfg(feature = "gdb")]
             gdb_socket_path: cfg.gdb_socket_path,
         }
@@ -288,6 +300,10 @@ impl MachineConfig {
             track_dirty_pages: update.track_dirty_pages.unwrap_or(self.track_dirty_pages),
             huge_pages: page_config,
             memfd_backed: update.memfd_backed.unwrap_or(self.memfd_backed),
+            mem_backing_dir: update
+                .mem_backing_dir
+                .clone()
+                .or_else(|| self.mem_backing_dir.clone()),
             #[cfg(feature = "gdb")]
             gdb_socket_path: update.gdb_socket_path.clone(),
         })

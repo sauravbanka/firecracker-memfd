@@ -71,6 +71,8 @@ pub enum MemoryError {
     SeekError(std::io::Error),
     /// Volatile memory error: {0}
     VolatileMemoryError(vm_memory::VolatileMemoryError),
+    /// Cannot open or operate on memory backing file: {0}
+    FileError(std::io::Error),
 }
 
 impl From<vm_memory::VolatileMemoryError> for MemoryError {
@@ -545,6 +547,44 @@ pub fn memfd_backed(
         regions.iter().copied(),
         libc::MAP_SHARED | huge_pages.mmap_flags(),
         Some(memfd_file),
+        track_dirty_pages,
+    )
+}
+
+/// Creates a GuestMemoryMmap backed by a real file on a COW-capable filesystem (XFS reflink).
+///
+/// This enables fast snapshots via fdatasync + FICLONE instead of copying all guest memory.
+/// The kernel's writeback threads continuously flush dirty MAP_SHARED pages to the backing
+/// file, so at snapshot time only residual dirty pages need to be synced.
+pub fn file_backed(
+    regions: &[(GuestAddress, usize)],
+    backing_dir: &std::path::Path,
+    track_dirty_pages: bool,
+) -> Result<Vec<GuestRegionMmap>, MemoryError> {
+    let total_size: u64 = regions.iter().map(|&(_, size)| size as u64).sum();
+
+    let path = backing_dir.join("guest_mem.backing");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(MemoryError::FileError)?;
+
+    // Preallocate to avoid ENOSPC during VM runtime and get contiguous extents
+    nix::fcntl::fallocate(
+        std::os::unix::io::AsRawFd::as_raw_fd(&file),
+        nix::fcntl::FallocateFlags::empty(),
+        0,
+        total_size as i64,
+    )
+    .map_err(|e| MemoryError::FileError(std::io::Error::from_raw_os_error(e as i32)))?;
+
+    create(
+        regions.iter().copied(),
+        libc::MAP_SHARED | libc::MAP_POPULATE,
+        Some(file),
         track_dirty_pages,
     )
 }

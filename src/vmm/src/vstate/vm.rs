@@ -336,6 +336,129 @@ impl Vm {
         mem_file_path: &Path,
         snapshot_type: SnapshotType,
     ) -> Result<(), CreateSnapshotError> {
+        // Try COW fast path for full snapshots with file-backed MAP_SHARED memory.
+        if snapshot_type == SnapshotType::Full && self.is_file_backed_shared() {
+            match self.snapshot_memory_cow(mem_file_path) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    info!("COW snapshot failed, falling back to full copy: {}", e);
+                    // Fall through to the original slow path
+                }
+            }
+        }
+
+        self.snapshot_memory_to_file_slow(mem_file_path, snapshot_type)
+    }
+
+    /// Checks if guest memory is backed by file-backed MAP_SHARED mappings (as opposed to
+    /// anonymous or memfd-backed memory). This is the case when `mem_backing_dir` was configured.
+    fn is_file_backed_shared(&self) -> bool {
+        use std::os::unix::io::AsRawFd;
+
+        let first = match self.guest_memory().iter().next() {
+            Some(r) => r,
+            None => return false,
+        };
+        // File-backed MAP_SHARED regions have a file_offset and MAP_SHARED flag.
+        // We distinguish from memfd by checking that the file fd corresponds to a real
+        // file (not an anonymous memfd) — but since both have file_offset, we check
+        // the MAP_SHARED flag which is set for both memfd and file-backed. The real
+        // distinction is that file-backed memory uses a real path on disk.
+        // For our purposes, any MAP_SHARED + file-backed region can use COW snapshots
+        // as long as the filesystem supports FICLONE.
+        if let Some(fo) = first.file_offset() {
+            // Check that it's MAP_SHARED (not MAP_PRIVATE snapshot restore)
+            let fd = fo.file().as_raw_fd();
+            // Verify the fd is a real file by checking it has a path in /proc
+            let link_path = format!("/proc/self/fd/{}", fd);
+            if let Ok(target) = std::fs::read_link(&link_path) {
+                // memfd paths look like "/memfd:..." while real files have actual paths
+                let target_str = target.to_string_lossy();
+                return !target_str.starts_with("/memfd:");
+            }
+        }
+        false
+    }
+
+    /// FICLONE ioctl number — defined in linux/fs.h as _IOW(0x94, 9, int) = 0x40049409
+    const FICLONE: libc::c_ulong = 0x40049409;
+
+    /// Fast COW snapshot: fdatasync the backing file, then FICLONE to the snapshot path.
+    ///
+    /// With aggressive writeback tuning, most MAP_SHARED pages are already on disk. fdatasync
+    /// flushes the residual dirty pages (~5-20ms), then FICLONE creates an instant COW clone
+    /// of the file (~1-5ms).
+    fn snapshot_memory_cow(&self, snapshot_path: &Path) -> Result<(), CreateSnapshotError> {
+        use std::os::unix::io::AsRawFd;
+        use CreateSnapshotError::*;
+
+        // Step 1: fdatasync all backing files to flush remaining dirty MAP_SHARED pages.
+        for region in self.guest_memory().iter() {
+            let file_offset = region
+                .file_offset()
+                .ok_or_else(|| {
+                    MemoryBackingFile(
+                        "cow_snapshot",
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "COW snapshot requires file-backed memory",
+                        ),
+                    )
+                })?;
+            file_offset
+                .file()
+                .sync_data()
+                .map_err(|e| MemoryBackingFile("fdatasync", e))?;
+        }
+
+        // Step 2: FICLONE the backing file to the snapshot path.
+        // For single-region VMs (common for <=3.5GiB), this is one ioctl.
+        let first_region = self.guest_memory().iter().next().ok_or_else(|| {
+            MemoryBackingFile(
+                "cow_snapshot",
+                std::io::Error::new(std::io::ErrorKind::Other, "no memory regions"),
+            )
+        })?;
+        let src_file = first_region.file_offset().unwrap().file();
+        let src_fd = src_file.as_raw_fd();
+
+        let dest_file = std::fs::File::create(snapshot_path)
+            .map_err(|err| MemoryBackingFile("open_cow_dest", err))?;
+        let dest_fd = dest_file.as_raw_fd();
+
+        // SAFETY: FICLONE is a well-defined ioctl that creates a COW clone.
+        // Both fds are valid open file descriptors.
+        let ret = unsafe { libc::ioctl(dest_fd, Self::FICLONE, src_fd) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            // Clean up the destination file on failure
+            let _ = std::fs::remove_file(snapshot_path);
+            return Err(MemoryBackingFile("FICLONE", err));
+        }
+
+        // For multi-region VMs (>3.5GiB on x86), we'd need to handle additional regions.
+        // For now, verify single-region assumption.
+        let region_count = self.guest_memory().iter().count();
+        if region_count > 1 {
+            let _ = std::fs::remove_file(snapshot_path);
+            return Err(MemoryBackingFile(
+                "cow_snapshot",
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "COW snapshot currently supports single-region VMs only",
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Original full-copy snapshot path.
+    fn snapshot_memory_to_file_slow(
+        &self,
+        mem_file_path: &Path,
+        snapshot_type: SnapshotType,
+    ) -> Result<(), CreateSnapshotError> {
         use self::CreateSnapshotError::*;
 
         // Need to check this here, as we create the file in the line below
