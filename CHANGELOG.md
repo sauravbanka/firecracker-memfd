@@ -28,6 +28,22 @@ and this project adheres to
   a descriptor chain that caused Firecracker to allocate more host memory than
   the guest actually provided, potentially leading to excessive host memory
   consumption.
+- [#5760](https://github.com/firecracker-microvm/firecracker/pull/5760): Fixed
+  HID (Hardware ID) of VMGenID device so that it aligns with the upstream Linux
+  kernel. This caused the driver not to be bound correctly to the device prior
+  to Linux kernel 6.10.
+- [#5780](https://github.com/firecracker-microvm/firecracker/pull/5780): Fixed
+  missing `/sys/devices/system/cpu/cpu*/cache/*` in aarch64 guests when running
+  on host kernels >= 6.3 with guest kernels >= 6.1.156.
+- [#5793](https://github.com/firecracker-microvm/firecracker/pull/5793): Fixed
+  virtio-mem plug/unplug skipping KVM slot updates for memory blocks not aligned
+  to a slot boundary. On plug, this could leave hotplugged memory inaccessible
+  to the guest. On unplug, the guest could retain access to memory that
+  Firecracker considered freed.
+- [#5794](https://github.com/firecracker-microvm/firecracker/pull/5794): Bound
+  balloon statistics descriptor length to prevent a guest-controlled oversized
+  descriptor from temporarily stalling the VMM event loop. Only affects microVMs
+  with `stats_polling_interval_s > 0`.
 
 ## [1.15.0]
 
