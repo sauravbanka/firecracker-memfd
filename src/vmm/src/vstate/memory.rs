@@ -570,23 +570,18 @@ pub fn file_backed(
         .open(&path)
         .map_err(MemoryError::FileError)?;
 
-    // Preallocate to avoid ENOSPC during VM runtime and get contiguous extents
-    // SAFETY: fd is a valid open file descriptor, and total_size fits in i64.
-    let ret = unsafe {
-        libc::fallocate(
-            std::os::unix::io::AsRawFd::as_raw_fd(&file),
-            0,
-            0,
-            total_size as i64,
-        )
-    };
-    if ret < 0 {
-        return Err(MemoryError::FileError(std::io::Error::last_os_error()));
-    }
+    // Set file size without pre-allocating extents (sparse file). Pages are
+    // faulted in lazily by the kernel on first access, matching the behavior
+    // of MAP_ANONYMOUS for stock Firecracker. XFS extents are allocated on
+    // first write, reflink CoW still works as expected at snapshot time.
+    // NOTE: previously used fallocate(fd, 0, 0, size) which eagerly zero-filled
+    // the whole file — this caused a ~7s regression on 512MB VM creates.
+    file.set_len(total_size)
+        .map_err(MemoryError::FileError)?;
 
     create(
         regions.iter().copied(),
-        libc::MAP_SHARED | libc::MAP_POPULATE,
+        libc::MAP_SHARED,
         Some(file),
         track_dirty_pages,
     )

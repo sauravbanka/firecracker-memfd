@@ -59,6 +59,10 @@
                 "syscall": "close"
             },
             {
+                "syscall": "unlinkat",
+                "comment": "aarch64 only has unlinkat; used by snapshot/create path to remove stale backing/snapshot files"
+            },
+            {
                 "syscall": "eventfd2",
                 "comment": "Used for creating io_uring completion event, on drive patch"
             },

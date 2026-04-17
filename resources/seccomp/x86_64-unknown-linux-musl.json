@@ -59,6 +59,14 @@
                 "syscall": "close"
             },
             {
+                "syscall": "unlink",
+                "comment": "Used by snapshot/create path to remove stale backing/snapshot files before overwrite"
+            },
+            {
+                "syscall": "unlinkat",
+                "comment": "Modern libc variant of unlink; Rust's std::fs::remove_file may dispatch to either"
+            },
+            {
                 "syscall": "eventfd2",
                 "comment": "Used for creating io_uring completion event, on drive patch"
             },
