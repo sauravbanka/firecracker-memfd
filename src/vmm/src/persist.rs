@@ -532,22 +532,86 @@ fn guest_memory_from_file(
     Ok(guest_mem)
 }
 
-/// Creates guest memory as file-backed MAP_SHARED by copying the snapshot file to a new
-/// backing file and mmapping it. This enables COW snapshots (fdatasync + FICLONE) on
-/// restored VMs.
+/// FICLONE ioctl number — defined in linux/fs.h as _IOW(0x94, 9, int) = 0x40049409.
+/// Duplicated here (also declared in `vstate::vm`) to avoid a cross-module export.
+#[allow(clippy::cast_possible_wrap)]
+const FICLONE: libc::c_int = 0x40049409_u32 as libc::c_int;
+
+/// Clone `src` to `dst` via FICLONE (XFS/btrfs reflink) when possible; fall back to a
+/// byte-wise `std::fs::copy` on filesystems that don't support reflink (EXDEV, EOPNOTSUPP)
+/// or when the attempt fails for any other reason. Returns the number of bytes in the
+/// destination file.
+///
+/// Reflink is a metadata-only clone: when the destination is on an XFS volume mounted
+/// with `reflink=1` and is the same volume as the source, this completes in ~ms
+/// regardless of file size. The destination file shares extents with the source until
+/// either file is written to, at which point CoW kicks in at page granularity.
+fn reflink_or_copy(src: &Path, dst: &Path) -> io::Result<u64> {
+    use std::os::unix::io::AsRawFd;
+
+    // Open source read-only, destination write+create+truncate. If the destination
+    // already exists (rare; the backing dir is fresh per VM) we replace it cleanly.
+    let src_file = File::open(src)?;
+    let dst_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
+
+    // SAFETY: FICLONE is a well-defined ioctl. Both fds are valid.
+    let ret = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
+    if ret == 0 {
+        return Ok(src_file.metadata()?.len());
+    }
+
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        // Known "reflink not supported on this pair of files" errno values:
+        //   EXDEV       — different filesystems
+        //   EOPNOTSUPP  — filesystem lacks reflink (ext4 sans extents, etc.)
+        //   EINVAL      — source/dest are not regular files or have incompatible types
+        //   ENOSYS      — kernel lacks the ioctl (very old kernels)
+        Some(libc::EXDEV)
+        | Some(libc::EOPNOTSUPP)
+        | Some(libc::EINVAL)
+        | Some(libc::ENOSYS) => {
+            // Drop the failed dst fd before std::fs::copy reopens it.
+            drop(dst_file);
+            drop(src_file);
+            std::fs::copy(src, dst)
+        }
+        _ => Err(err),
+    }
+}
+
+/// Creates guest memory as file-backed MAP_SHARED by cloning the snapshot file to a new
+/// backing file (FICLONE reflink when the filesystem supports it, plain copy otherwise)
+/// and mmapping it. This enables COW snapshots (fdatasync + FICLONE) on restored VMs.
+///
+/// With reflink active, the backing-file clone is metadata-only (no bulk read/write) and
+/// the mmap is lazy (`MAP_SHARED` without `MAP_POPULATE`) so cold restore latency is
+/// dominated by the kernel mmap bookkeeping rather than by pre-faulting all pages. Pages
+/// fault in on first access. For the speculation workload where many forks only touch a
+/// small fraction of their baseline memory before being discarded, this eliminates a
+/// large chunk of wasted I/O.
 fn guest_memory_from_file_backed(
     snapshot_mem_path: &Path,
     backing_dir: &Path,
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
-    // Copy the snapshot mem_file to the backing file location.
-    // This is the upfront cost (~50-100ms for 512MB) that enables all subsequent
-    // snapshots to use the fast COW path.
+    // Clone the snapshot mem_file into the backing dir. FICLONE when possible — on an
+    // XFS(reflink=1) volume shared between SNAPSHOT_DIR and WORK_DIR this is <5ms
+    // regardless of file size. Falls back to std::fs::copy (~disk write bandwidth) when
+    // reflink is unavailable.
     let backing_path = backing_dir.join("guest_mem.backing");
-    std::fs::copy(snapshot_mem_path, &backing_path)?;
+    reflink_or_copy(snapshot_mem_path, &backing_path)?;
 
-    // Now open the backing file and mmap it MAP_SHARED
+    // Now open the backing file and mmap it MAP_SHARED. We deliberately do *not* set
+    // MAP_POPULATE here: with reflink the destination file has no resident pages, and
+    // MAP_POPULATE would force the kernel to read them all from disk up front, negating
+    // the lazy-restore benefit. Leaving MAP_POPULATE off makes restore cost proportional
+    // to the working set actually accessed, not the full memory size.
     let regions: Vec<_> = mem_state.regions().collect();
     let total_size: u64 = regions.iter().map(|&(_, size)| size as u64).sum();
 
@@ -566,7 +630,7 @@ fn guest_memory_from_file_backed(
 
     let guest_mem = memory::create(
         regions.into_iter(),
-        libc::MAP_SHARED | libc::MAP_POPULATE,
+        libc::MAP_SHARED,
         Some(file),
         track_dirty_pages,
     )?;

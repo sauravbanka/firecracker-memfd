@@ -363,31 +363,65 @@ impl Vm {
     /// With aggressive writeback tuning, most MAP_SHARED pages are already on disk. fdatasync
     /// flushes the residual dirty pages (~5-20ms), then FICLONE creates an instant COW clone
     /// of the file (~1-5ms).
+    ///
+    /// Works for single- and multi-region VMs alike. Both `memfd_backed()` and `file_backed()`
+    /// (see `crate::vstate::memory::create`) allocate a single backing file that is split
+    /// into multiple regions via distinct `FileOffset` values — region N's bytes live at
+    /// `[sum(size_0..size_{N-1}), sum(size_0..size_N))` within the one backing file. On x86
+    /// with >=4 GiB configured memory the PCI hole produces two regions, but the backing
+    /// file is laid out contiguously without a gap, so cloning the whole file yields a
+    /// snapshot file that firecracker's restore code can map back into the same layout.
+    ///
+    /// We verify that all regions share the same backing file (identified by inode on the
+    /// same device). If any region uses a different file — which current firecracker-memfd
+    /// code does not produce, but future work might — we fall back to the slow path rather
+    /// than produce a partially-cloned snapshot.
     fn snapshot_memory_cow(&self, snapshot_path: &Path) -> Result<(), CreateSnapshotError> {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;
         use CreateSnapshotError::*;
 
-        // Step 1: fdatasync all backing files to flush remaining dirty MAP_SHARED pages.
+        // Step 1: fdatasync the backing file(s) to flush residual MAP_SHARED dirty pages.
+        // Identify the shared backing file via its (dev, inode) pair at the same time —
+        // this is cheap (one stat per region) and catches any future config that forks
+        // memory across multiple backing files.
+        let mut first_ino_dev: Option<(u64, u64)> = None;
         for region in self.guest_memory().iter() {
-            let file_offset = region
-                .file_offset()
-                .ok_or_else(|| {
-                    MemoryBackingFile(
+            let file_offset = region.file_offset().ok_or_else(|| {
+                MemoryBackingFile(
+                    "cow_snapshot",
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "COW snapshot requires file-backed memory",
+                    ),
+                )
+            })?;
+            let file = file_offset.file();
+            file.sync_all()
+                .map_err(|e| MemoryBackingFile("fsync", e))?;
+
+            let meta = file
+                .metadata()
+                .map_err(|e| MemoryBackingFile("stat_backing", e))?;
+            let ino_dev = (meta.ino(), meta.dev());
+            match first_ino_dev {
+                None => first_ino_dev = Some(ino_dev),
+                Some(prev) if prev == ino_dev => {}
+                Some(_) => {
+                    return Err(MemoryBackingFile(
                         "cow_snapshot",
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
-                            "COW snapshot requires file-backed memory",
+                            "COW snapshot requires all regions to share one backing file",
                         ),
-                    )
-                })?;
-            file_offset
-                .file()
-                .sync_all()
-                .map_err(|e| MemoryBackingFile("fsync", e))?;
+                    ));
+                }
+            }
         }
 
-        // Step 2: FICLONE the backing file to the snapshot path.
-        // For single-region VMs (common for <=3.5GiB), this is one ioctl.
+        // Step 2: FICLONE the backing file to the snapshot path. Because all regions share
+        // the backing file (verified above), a single whole-file clone covers every region
+        // at the correct offset, whether the VM has 1 or many memory regions.
         let first_region = self.guest_memory().iter().next().ok_or_else(|| {
             MemoryBackingFile(
                 "cow_snapshot",
@@ -409,20 +443,6 @@ impl Vm {
             // Clean up the destination file on failure
             let _ = std::fs::remove_file(snapshot_path);
             return Err(MemoryBackingFile("FICLONE", err));
-        }
-
-        // For multi-region VMs (>3.5GiB on x86), we'd need to handle additional regions.
-        // For now, verify single-region assumption.
-        let region_count = self.guest_memory().iter().count();
-        if region_count > 1 {
-            let _ = std::fs::remove_file(snapshot_path);
-            return Err(MemoryBackingFile(
-                "cow_snapshot",
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "COW snapshot currently supports single-region VMs only",
-                ),
-            ));
         }
 
         Ok(())
